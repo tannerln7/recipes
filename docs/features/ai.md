@@ -91,27 +91,21 @@ Then configure the provider:
 
 ```text
 Name: Cloudflare Workers AI
-Model name: cloudflare/@cf/meta/llama-3.2-11b-vision-instruct
+Model name: cloudflare/@cf/google/gemma-4-26b-a4b-it
 API key: <Workers AI API token>
 URL: (leave empty)
 Log credit cost: enabled
 ```
 
-The recommended Meta vision model requires one-time acceptance of Meta's license and acceptable use policy before normal requests work. Run this once with your own account ID and Workers AI token:
+The model runs in Cloudflare Workers AI, so it uses the same Cloudflare account ID and Workers AI token shown above. No Google API key is required. Tandoor disables Gemma's thinking mode for structured extraction and sends blank-URL Gemma requests through LiteLLM's OpenAI-compatible Cloudflare transport.
 
-```bash
-curl "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.2-11b-vision-instruct" \
-  -X POST \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"agree"}'
-```
+The API token must have access to Workers AI for the configured account. Image import requires a vision-capable model. PDF support is provider-dependent and has not been validated for this setup; convert a PDF to images or use text import when the selected model does not accept PDFs.
 
-This acceptance step applies to the recommended `@cf/meta/llama-3.2-11b-vision-instruct` model and is not necessarily required by every Cloudflare model. See Cloudflare's [Llama Vision tutorial](https://developers.cloudflare.com/workers-ai/guides/tutorials/llama-vision-tutorial/) for details.
+##### Optional Llama 3.2 Vision compatibility
 
-The API token must have access to Workers AI for the configured account. Image import requires a vision-capable model. Native PDF input remains model- and provider-dependent; convert a PDF to images or use text import when the selected model does not accept PDFs.
+The model name `cloudflare/@cf/meta/llama-3.2-11b-vision-instruct` remains available for compatibility. With an empty provider URL, Tandoor sends this model through Cloudflare's native `/ai/run/<model>` endpoint. This native compatibility route is model-specific; other blank-URL Cloudflare models can use LiteLLM's OpenAI-compatible transport.
 
-When the URL is left empty, Tandoor uses Cloudflare's native `/ai/run/<model>` endpoint so Workers AI can enforce `json_object` and `json_schema` response formats. A Cloudflare provider with a custom URL continues through LiteLLM's configured endpoint path; that endpoint or gateway must support structured output itself.
+The Meta model requires one-time acceptance of Meta's license and acceptable use policy. Follow Cloudflare's [Llama Vision tutorial](https://developers.cloudflare.com/workers-ai/guides/tutorials/llama-vision-tutorial/) before using it. A Cloudflare provider with a custom URL always continues through LiteLLM and the configured allowed endpoint; that endpoint or gateway must support structured output itself.
 
 ### Requirements for models
 Tandoor expects structured JSON responses from every AI call, so your model must support JSON mode or reliably return JSON.

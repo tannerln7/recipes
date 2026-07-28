@@ -114,14 +114,13 @@ def test_step_sort_sends_compact_plan_and_reconstructs_full_recipe(
     compact_payload = json.loads(mock_completion.call_args.kwargs['messages'][0]['content'][1]['text'])
     assert mock_completion.call_args.kwargs['max_tokens'] == AI_OUTPUT_TOKEN_BUDGETS[AiLog.F_STEP_SORT]
 
-    assert set(compact_payload) == {'steps'}
-    assert set(compact_payload['steps'][0]) == {
-        'step_key',
+    assert set(compact_payload) == {'source_steps', 'ingredients'}
+    assert set(compact_payload['source_steps'][0]) == {
+        'source_step_key',
         'name',
         'instruction',
-        'ingredients',
     }
-    assert set(compact_payload['steps'][0]['ingredients'][0]) == {
+    assert set(compact_payload['ingredients'][0]) == {
         'ingredient_key',
         'display_text',
         'food_name',
@@ -129,6 +128,8 @@ def test_step_sort_sends_compact_plan_and_reconstructs_full_recipe(
         'unit_name',
         'note',
     }
+    assert [step['source_step_key'] for step in compact_payload['source_steps']] == ['s0']
+    assert [ingredient['ingredient_key'] for ingredient in compact_payload['ingredients']] == ['i0', 'i1']
     assert len(json.dumps(compact_payload)) < len(json.dumps(editor_recipe)) / 2
     for excluded in ['properties', 'shopping_lists', 'fdc_id', 'open_data_slug', 'substitute']:
         assert excluded not in json.dumps(compact_payload)
@@ -264,7 +265,12 @@ def test_step_sort_moves_scraper_layout_ingredients_to_later_steps(
     assert result['steps'][0]['ingredients'] == [original_ingredients[0]]
     assert result['steps'][1]['ingredients'] == [original_ingredients[1]]
     model_prompt = mock_completion.call_args.kwargs['messages'][0]['content'][0]['text']
-    assert 'may move to a step derived from any source step' in model_prompt
+    assert 'earliest output instruction where it is actually used' in model_prompt
+    assert 'Split each source instruction into coherent recipe steps.' in model_prompt
+    assert 'Preserve the source language and instruction order.' in model_prompt
+    compact_payload = json.loads(mock_completion.call_args.kwargs['messages'][0]['content'][1]['text'])
+    assert len(compact_payload['ingredients']) == 2
+    assert all('ingredients' not in source_step for source_step in compact_payload['source_steps'])
 
     save_response = a1_s1.patch(
         reverse('api:recipe-detail', kwargs={'pk': recipe.pk}),
@@ -288,14 +294,6 @@ def test_step_sort_moves_scraper_layout_ingredients_to_later_steps(
                 'ingredient_keys': ['unknown'],
             }],
         }, 'unknown ingredient'),
-        ({
-            'steps': [{
-                'source_step_key': 's0',
-                'name': 'Invalid',
-                'instruction': 'Invalid',
-                'ingredient_keys': ['i0', 'i0', 'i1'],
-            }],
-        }, 'more than once'),
         ({
             'steps': [{
                 'source_step_key': 's0',
@@ -328,6 +326,43 @@ def test_step_sort_rejects_invalid_plans(
     assert error_fragment in json.loads(response.content)['msg'].lower()
     assert 'test-key' not in response.content.decode()
     assert editor_recipe['description'] not in response.content.decode()
+
+
+@pytest.mark.django_db
+@patch('cookbook.helper.ai_helper.completion')
+def test_step_sort_keeps_first_duplicate_ingredient_assignment(
+    mock_completion,
+    editor_recipe,
+    ai_space,
+    a1_s1,
+):
+    mock_completion.return_value = completion_response({
+        'steps': [
+            {
+                'source_step_key': 's0',
+                'name': 'Mix',
+                'instruction': 'Mix the flour.',
+                'ingredient_keys': ['i0'],
+            },
+            {
+                'source_step_key': 's0',
+                'name': 'Finish',
+                'instruction': 'Mention flour again, then add butter.',
+                'ingredient_keys': ['i0', 'i1'],
+            },
+        ],
+    })
+
+    response = a1_s1.post(
+        f'{reverse("api_ai_step_sort")}?provider={ai_space.ai_provider.pk}',
+        json.dumps(editor_recipe),
+        content_type='application/json',
+    )
+
+    assert response.status_code == 200
+    result = json.loads(response.content)
+    assert [ingredient['food']['name'] for ingredient in result['steps'][0]['ingredients']] == ['Flour']
+    assert [ingredient['food']['name'] for ingredient in result['steps'][1]['ingredients']] == ['Butter']
 
 
 @pytest.mark.django_db
@@ -373,8 +408,8 @@ def test_shared_ingredient_id_gets_distinct_occurrence_keys(
 
     assert response.status_code == 200
     compact_payload = json.loads(mock_completion.call_args.kwargs['messages'][0]['content'][1]['text'])
-    assert compact_payload['steps'][0]['ingredients'][0]['ingredient_key'] == 'i0'
-    assert compact_payload['steps'][1]['ingredients'][0]['ingredient_key'] == 'i1'
+    assert compact_payload['ingredients'][0]['ingredient_key'] == 'i0'
+    assert compact_payload['ingredients'][1]['ingredient_key'] == 'i1'
     result = json.loads(response.content)
     assert result['steps'][0]['ingredients'][0]['id'] == shared_ingredient.id
     assert result['steps'][1]['ingredients'][0]['id'] == shared_ingredient.id

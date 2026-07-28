@@ -84,6 +84,12 @@ AI_OUTPUT_TOKEN_BUDGETS = {
     AiLog.F_STEP_SORT: 4096,
 }
 
+CLOUDFLARE_LLAMA_VISION_MODEL = 'cloudflare/@cf/meta/llama-3.2-11b-vision-instruct'
+CLOUDFLARE_GEMMA_MODEL = 'cloudflare/@cf/google/gemma-4-26b-a4b-it'
+CLOUDFLARE_NATIVE_COMPATIBILITY_MODELS = frozenset({
+    CLOUDFLARE_LLAMA_VISION_MODEL,
+})
+
 
 def is_cloudflare_provider(model_name):
     """Return whether a LiteLLM model name selects the Cloudflare provider."""
@@ -91,7 +97,11 @@ def is_cloudflare_provider(model_name):
 
 
 def uses_native_cloudflare_transport(ai_provider):
-    return is_cloudflare_provider(ai_provider.model_name) and not ai_provider.url
+    return not ai_provider.url and ai_provider.model_name in CLOUDFLARE_NATIVE_COMPATIBILITY_MODELS
+
+
+def disables_gemma_thinking(ai_provider):
+    return ai_provider.model_name == CLOUDFLARE_GEMMA_MODEL
 
 
 def get_ai_provider(provider_id, space):
@@ -123,6 +133,15 @@ def build_ai_request(ai_provider, messages, callback=None, json_schema=None, max
     if max_output_tokens is not None:
         ai_request['max_tokens'] = max_output_tokens
 
+    if disables_gemma_thinking(ai_provider):
+        # Cloudflare's Gemma 4 chat template emits reasoning unless thinking is
+        # disabled in the model-specific template arguments.
+        ai_request['extra_body'] = {
+            'chat_template_kwargs': {
+                'enable_thinking': False,
+            },
+        }
+
     if ai_provider.url:
         if ai_provider.url not in settings.AI_ALLOWED_URLS:
             raise AiProviderUrlNotAllowedError()
@@ -145,7 +164,6 @@ def build_ai_request(ai_provider, messages, callback=None, json_schema=None, max
 
 def build_cloudflare_native_payload(messages, response_format, max_output_tokens=None):
     native_messages = []
-    image = None
 
     for message in messages:
         content = message.get('content')
@@ -156,24 +174,44 @@ def build_cloudflare_native_payload(messages, response_format, max_output_tokens
             })
             continue
 
+        native_parts = []
         text_parts = []
+        contains_image = False
         for part in content:
+            if not isinstance(part, dict):
+                raise AiUnsupportedParameterError('Cloudflare native requests received invalid message content.')
+
             if part.get('type') == 'text':
-                text_parts.append(str(part.get('text', '')))
+                text = part.get('text')
+                if not isinstance(text, str):
+                    raise AiUnsupportedParameterError('Cloudflare native requests received invalid text content.')
+                text_parts.append(text)
+                native_parts.append({
+                    'type': 'text',
+                    'text': text,
+                })
                 continue
+
             if part.get('type') == 'image_url':
                 image_url = part.get('image_url')
                 if isinstance(image_url, dict):
                     image_url = image_url.get('url')
-                if image is not None or not isinstance(image_url, str):
-                    raise AiUnsupportedParameterError('Cloudflare native requests support one image per AI request.')
-                image = image_url
+                if not isinstance(image_url, str) or not image_url.strip():
+                    raise AiUnsupportedParameterError('Cloudflare native requests received an invalid image URL.')
+                contains_image = True
+                native_parts.append({
+                    'type': 'image_url',
+                    'image_url': {
+                        'url': image_url,
+                    },
+                })
                 continue
+
             raise AiUnsupportedParameterError('Cloudflare native requests received an unsupported message content type.')
 
         native_messages.append({
             **message,
-            'content': '\n'.join(text_parts),
+            'content': native_parts if contains_image else '\n'.join(text_parts),
         })
 
     payload = {
@@ -182,8 +220,6 @@ def build_cloudflare_native_payload(messages, response_format, max_output_tokens
     }
     if max_output_tokens is not None:
         payload['max_tokens'] = max_output_tokens
-    if image is not None:
-        payload['image'] = image
     return payload
 
 

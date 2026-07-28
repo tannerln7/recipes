@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from cookbook.helper.ai_helper import AI_OUTPUT_TOKEN_BUDGETS
-from cookbook.helper.ai_step_sort import AiStepTransformationError, _validate_plan, build_step_sort_payload, reconstruct_step_sorted_recipe
+from cookbook.helper.ai_step_sort import AI_STEP_SORT_PROMPT, AiStepTransformationError, _validate_plan, build_step_sort_payload, reconstruct_step_sorted_recipe
 from cookbook.models import AiLog
 
 
@@ -88,34 +88,39 @@ def split_plan():
     }
 
 
+def test_step_sort_prompt_requires_coherent_splitting_and_source_language():
+    assert 'Split each source instruction into coherent recipe steps.' in AI_STEP_SORT_PROMPT
+    assert 'Preserve the source language and instruction order.' in AI_STEP_SORT_PROMPT
+
+
 def test_compact_payload_excludes_nested_food_metadata():
     original = recipe_data()
     payload, _ = build_step_sort_payload(original)
 
     assert payload == {
-        'steps': [{
-            'step_key': 's0',
+        'source_steps': [{
+            'source_step_key': 's0',
             'name': 'Combined',
             'instruction': 'Mix the flour. Add the butter.',
-            'ingredients': [
-                {
-                    'ingredient_key': 'i0',
-                    'display_text': '2.0000000000000000 cups Flour',
-                    'food_name': 'Flour',
-                    'amount': '2.0000000000000000',
-                    'unit_name': 'cups',
-                    'note': '',
-                },
-                {
-                    'ingredient_key': 'i1',
-                    'display_text': '1.0000000000000000 Butter cold',
-                    'food_name': 'Butter',
-                    'amount': '1.0000000000000000',
-                    'unit_name': '',
-                    'note': 'cold',
-                },
-            ],
         }],
+        'ingredients': [
+            {
+                'ingredient_key': 'i0',
+                'display_text': '2.0000000000000000 cups Flour',
+                'food_name': 'Flour',
+                'amount': '2.0000000000000000',
+                'unit_name': 'cups',
+                'note': '',
+            },
+            {
+                'ingredient_key': 'i1',
+                'display_text': '1.0000000000000000 Butter cold',
+                'food_name': 'Butter',
+                'amount': '1.0000000000000000',
+                'unit_name': '',
+                'note': 'cold',
+            },
+        ],
     }
     assert 'properties' not in str(payload)
     assert 'shopping_lists' not in str(payload)
@@ -148,7 +153,7 @@ def test_unsaved_and_repeated_ids_get_unique_occurrence_keys():
 
     payload, _ = build_step_sort_payload(original)
 
-    assert [ingredient['ingredient_key'] for step in payload['steps'] for ingredient in step['ingredients']] == [
+    assert [ingredient['ingredient_key'] for ingredient in payload['ingredients']] == [
         'i0',
         'i1',
         'i2',
@@ -206,11 +211,32 @@ def test_blank_source_header_can_remain_blank():
     assert _validate_plan(plan, context)['steps'][0]['instruction'] == ''
 
 
+def test_duplicate_ingredient_within_one_step_keeps_first_assignment():
+    _, context = build_step_sort_payload(recipe_data())
+    plan = split_plan()
+    plan['steps'][0]['ingredient_keys'] = ['i0', 'i0']
+
+    validated = _validate_plan(plan, context)
+
+    assert validated['steps'][0]['ingredient_keys'] == ['i0']
+    assert validated['steps'][1]['ingredient_keys'] == ['i1']
+
+
+def test_duplicate_ingredient_on_later_step_is_removed_from_later_assignment():
+    _, context = build_step_sort_payload(recipe_data())
+    plan = split_plan()
+    plan['steps'][1]['ingredient_keys'] = ['i0', 'i1']
+
+    validated = _validate_plan(plan, context)
+
+    assert validated['steps'][0]['ingredient_keys'] == ['i0']
+    assert validated['steps'][1]['ingredient_keys'] == ['i1']
+
+
 @pytest.mark.parametrize(
     'mutate_plan', [
         lambda plan: plan['steps'][0].update(source_step_key='unknown'),
         lambda plan: plan['steps'][0]['ingredient_keys'].append('unknown'),
-        lambda plan: plan['steps'][1]['ingredient_keys'].append('i0'),
         lambda plan: plan['steps'][1].update(ingredient_keys=[]),
         lambda plan: plan['steps'][0].update(fabricated=True),
     ]

@@ -6,6 +6,16 @@ from cookbook.helper.ai_helper import AiStructuredOutputError
 from cookbook.helper.template_helper import IngredientObject, render_instruction_text
 from cookbook.serializer import RecipeSerializer
 
+AI_STEP_SORT_PROMPT = (
+    'Return exactly one JSON object with one top-level steps array and no other top-level fields. Every output step must '
+    'contain exactly source_step_key, name, instruction, and ingredient_keys. Split each source instruction into coherent '
+    'recipe steps. Preserve the source language and instruction order. Preserve the original source-step order, keep '
+    'steps derived from one source contiguous, and return at least one output step for every source step. ingredient_keys '
+    'must contain only supplied ingredient_key strings, never copied ingredient objects or display metadata. Assign each '
+    'ingredient occurrence to the earliest output instruction where it is actually used. Do not invent, omit, or modify '
+    'keys. Return only JSON without Markdown or explanatory prose.'
+)
+
 
 class AiStepTransformationError(AiStructuredOutputError):
     client_message = 'The AI provider returned an invalid or incomplete step transformation.'
@@ -46,13 +56,13 @@ def build_step_sort_payload(recipe_data):
     original_recipe = deepcopy(dict(recipe_data))
     source_steps = {}
     ingredients = {}
-    compact_steps = []
+    compact_source_steps = []
+    compact_ingredients = []
     ingredient_index = 0
 
     for step_index, source_step in enumerate(original_recipe.get('steps', [])):
         step_key = f's{step_index}'
         source_steps[step_key] = source_step
-        compact_ingredients = []
 
         for ingredient in source_step.get('ingredients', []):
             ingredient_key = f'i{ingredient_index}'
@@ -70,14 +80,16 @@ def build_step_sort_payload(recipe_data):
                 'note': _string_value(ingredient.get('note')),
             })
 
-        compact_steps.append({
-            'step_key': step_key,
+        compact_source_steps.append({
+            'source_step_key': step_key,
             'name': _string_value(source_step.get('name')),
             'instruction': _string_value(source_step.get('instruction')),
-            'ingredients': compact_ingredients,
         })
 
-    payload = {'steps': compact_steps}
+    payload = {
+        'source_steps': compact_source_steps,
+        'ingredients': compact_ingredients,
+    }
     serializer = AiStepSortRequestSerializer(data=payload)
     if not serializer.is_valid():
         raise AiStepTransformationError('The recipe could not be converted to the compact step-sort format.')
@@ -89,6 +101,27 @@ def build_step_sort_payload(recipe_data):
     )
 
 
+def _normalize_ingredient_assignments(plan, context):
+    assigned_ingredients = set()
+
+    for output_step in plan['steps']:
+        normalized_keys = []
+        for ingredient_key in output_step['ingredient_keys']:
+            if ingredient_key not in context.ingredients:
+                raise AiStepTransformationError('The AI step transformation referenced an unknown ingredient.')
+            if ingredient_key in assigned_ingredients:
+                continue
+
+            assigned_ingredients.add(ingredient_key)
+            normalized_keys.append(ingredient_key)
+
+        # Models can mention one occurrence on several consecutive instructions.
+        # Retain its first (earliest) placement and discard later repetitions.
+        output_step['ingredient_keys'] = normalized_keys
+
+    return assigned_ingredients
+
+
 def _validate_plan(plan_data, context):
     serializer = AiStepSortPlanSerializer(data=plan_data)
     if not serializer.is_valid():
@@ -98,7 +131,7 @@ def _validate_plan(plan_data, context):
     expected_source_order = list(context.source_steps)
     actual_source_order = []
     seen_sources = set()
-    assigned_ingredients = set()
+    assigned_ingredients = _normalize_ingredient_assignments(plan, context)
     source_has_nonblank_output = {step_key: False for step_key in expected_source_order}
 
     for output_step in plan['steps']:
@@ -114,13 +147,6 @@ def _validate_plan(plan_data, context):
 
         if output_step['instruction'].strip():
             source_has_nonblank_output[source_key] = True
-
-        for ingredient_key in output_step['ingredient_keys']:
-            if ingredient_key not in context.ingredients:
-                raise AiStepTransformationError('The AI step transformation referenced an unknown ingredient.')
-            if ingredient_key in assigned_ingredients:
-                raise AiStepTransformationError('The AI step transformation assigned an ingredient more than once.')
-            assigned_ingredients.add(ingredient_key)
 
     if actual_source_order != expected_source_order:
         raise AiStepTransformationError('The AI step transformation omitted or reordered a source step.')

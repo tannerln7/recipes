@@ -8,8 +8,9 @@ from django.test import override_settings
 from litellm.exceptions import AuthenticationError, BadRequestError, Timeout, UnsupportedParamsError
 
 from cookbook.helper.ai_helper import (
-    AI_OUTPUT_TOKEN_BUDGETS, AiAuthenticationError, AiProviderRequestError, AiProviderUrlNotAllowedError, AiRequestTimeoutError, AiStructuredOutputError,
-    AiUnsupportedParameterError, build_ai_request, build_cloudflare_native_payload, complete_cloudflare_native, complete_structured, parse_structured_content
+    AI_OUTPUT_TOKEN_BUDGETS, CLOUDFLARE_GEMMA_MODEL, CLOUDFLARE_LLAMA_VISION_MODEL, AiAuthenticationError, AiProviderRequestError, AiProviderUrlNotAllowedError,
+    AiRequestTimeoutError, AiStructuredOutputError, AiUnsupportedParameterError, build_ai_request, build_cloudflare_native_payload, complete_cloudflare_native,
+    complete_structured, parse_structured_content, uses_native_cloudflare_transport
 )
 from cookbook.models import AiLog
 
@@ -67,16 +68,44 @@ def test_cloudflare_request_gets_schema_and_allowed_parameter():
     )
 
     assert request['allowed_openai_params'] == ['response_format']
+    assert 'extra_body' not in request
+    assert 'reasoning_effort' not in request
     assert request['response_format'] == {
         'type': 'json_schema',
         'json_schema': schema,
     }
 
 
+def test_gemma_request_disables_thinking_through_exact_extra_body():
+    request = build_ai_request(provider(CLOUDFLARE_GEMMA_MODEL), [])
+
+    assert request['extra_body'] == {
+        'chat_template_kwargs': {
+            'enable_thinking': False,
+        },
+    }
+    assert request['allowed_openai_params'] == ['response_format']
+    assert 'reasoning_effort' not in request
+
+
+@pytest.mark.parametrize(
+    'ai_provider,expected_native', [
+        (provider(CLOUDFLARE_LLAMA_VISION_MODEL), True),
+        (provider(CLOUDFLARE_GEMMA_MODEL), False),
+        (provider(CLOUDFLARE_LLAMA_VISION_MODEL, url='https://allowed.example/v1'), False),
+        (provider('openai/test-model'), False),
+    ]
+)
+def test_cloudflare_transport_policy_is_model_and_url_aware(ai_provider, expected_native):
+    assert uses_native_cloudflare_transport(ai_provider) is expected_native
+
+
 def test_non_cloudflare_provider_does_not_get_cloudflare_override():
     request = build_ai_request(provider('anthropic/claude-test'), [], json_schema={'type': 'object'})
 
     assert 'allowed_openai_params' not in request
+    assert 'extra_body' not in request
+    assert 'reasoning_effort' not in request
     assert request['response_format'] == {
         'type': 'json_object',
     }
@@ -132,7 +161,7 @@ def test_structured_parser_rejects_non_structured_content(content):
         parse_structured_content(content)
 
 
-def test_cloudflare_native_payload_converts_openai_image_content():
+def test_cloudflare_native_payload_preserves_inline_image_content():
     payload = build_cloudflare_native_payload(
         [{
             'role': 'user',
@@ -155,14 +184,84 @@ def test_cloudflare_native_payload_converts_openai_image_content():
     assert payload == {
         'messages': [{
             'role': 'user',
-            'content': 'Read this image.',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'Read this image.',
+                },
+                {
+                    'type': 'image_url',
+                    'image_url': {
+                        'url': 'data:image/png;base64,AAAA',
+                    },
+                },
+            ],
         }],
-        'image': 'data:image/png;base64,AAAA',
         'response_format': {
             'type': 'json_object',
         },
     }
+    assert 'image' not in payload
     assert 'max_tokens' not in payload
+
+
+def test_cloudflare_native_payload_keeps_text_only_content_as_text():
+    payload = build_cloudflare_native_payload(
+        [{
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'First.',
+                },
+                {
+                    'type': 'text',
+                    'text': 'Second.',
+                },
+            ],
+        }],
+        {
+            'type': 'json_object',
+        },
+        max_output_tokens=512,
+    )
+
+    assert payload['messages'][0]['content'] == 'First.\nSecond.'
+    assert payload['max_tokens'] == 512
+    assert 'image' not in payload
+
+
+@pytest.mark.parametrize(
+    'content', [
+        ['invalid'],
+        [{
+            'type': 'text',
+            'text': None,
+        }],
+        [{
+            'type': 'image_url',
+            'image_url': '',
+        }],
+        [{
+            'type': 'image_url',
+            'image_url': {},
+        }],
+        [{
+            'type': 'unsupported',
+        }],
+    ]
+)
+def test_cloudflare_native_payload_rejects_malformed_content_parts(content):
+    with pytest.raises(AiUnsupportedParameterError):
+        build_cloudflare_native_payload(
+            [{
+                'role': 'user',
+                'content': content,
+            }],
+            {
+                'type': 'json_object',
+            },
+        )
 
 
 @pytest.mark.parametrize('native_content', [
@@ -192,7 +291,7 @@ def test_complete_structured_normalizes_cloudflare_native_response(
     )
 
     result = complete_structured(
-        provider('cloudflare/@cf/meta/llama-3.2-11b-vision-instruct'),
+        provider(CLOUDFLARE_LLAMA_VISION_MODEL),
         [{
             'role': 'user',
             'content': 'Return JSON.',
@@ -236,7 +335,7 @@ def test_cloudflare_native_callback_receives_usage(mock_post, monkeypatch):
     )
 
     content = complete_cloudflare_native(
-        provider('cloudflare/@cf/meta/llama-3.2-11b-vision-instruct'),
+        provider(CLOUDFLARE_LLAMA_VISION_MODEL),
         [],
         callback=callback,
         json_schema={
@@ -271,7 +370,7 @@ def test_cloudflare_native_timeout_is_classified(mock_post, monkeypatch):
 
     with pytest.raises(AiRequestTimeoutError):
         complete_cloudflare_native(
-            provider('cloudflare/@cf/meta/llama-3.2-11b-vision-instruct'),
+            provider(CLOUDFLARE_LLAMA_VISION_MODEL),
             [],
             callback=MagicMock(),
         )
