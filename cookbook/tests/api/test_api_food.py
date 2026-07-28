@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 from django.contrib import auth
@@ -7,9 +8,8 @@ from django.urls import reverse
 from django_scopes import scope, scopes_disabled
 from pytest_factoryboy import LazyFixture, register
 
-from cookbook.models import Food, Ingredient, ShoppingListEntry, Household, UserSpace
-from cookbook.tests.factories import (FoodFactory, IngredientFactory, ShoppingListEntryFactory,
-                                      SupermarketCategoryFactory)
+from cookbook.models import Food, Household, Ingredient, ShoppingListEntry, UserSpace
+from cookbook.tests.factories import FoodFactory, IngredientFactory, ShoppingListEntryFactory, SupermarketCategoryFactory
 
 #    ------------------ IMPORTANT -------------------
 #
@@ -428,6 +428,16 @@ def test_merge_errors(u1_s1, obj_tree_1, obj_3, space_1):
         reverse(MERGE_URL, args=[obj_tree_1.id, obj_tree_1.id])
     )
     assert r.status_code == 403
+
+
+def test_merge_failure_returns_controlled_error(u1_s1, obj_1, obj_2):
+    with patch.object(Food, 'delete', side_effect=RuntimeError('merge failed')):
+        response = u1_s1.put(reverse(MERGE_URL, args=[obj_1.id, obj_2.id]))
+
+    assert response.status_code == 400
+    data = json.loads(response.content)
+    assert data['error'] is True
+    assert 'error occurred attempting to merge' in data['msg'].lower()
 
 
 def test_root_filter(obj_tree_1, obj_2, obj_3, u1_s1):
