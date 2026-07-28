@@ -19,6 +19,7 @@ psycopg2-binary==2.9.10
 python-dotenv==1.2.2
 requests==2.33.0
 requests_hardened==1.2.1
+httpx==0.28.1
 six==1.17.0
 webdavclient3==3.14.6
 whitenoise==6.12.0
@@ -50,7 +51,7 @@ pyjwt==2.13.0
 python3-openid==3.2.0
 python3-saml==1.16.0
 django-vite==3.1.0
-litellm==1.89.3
+litellm==1.91.0
 thefuzz==0.22.1
 stripe==14.0.0
 frappe-client==0.1.0.dev0

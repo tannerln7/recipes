@@ -2,6 +2,7 @@ import base64
 import datetime
 import io
 import json
+import logging
 import mimetypes
 import pathlib
 import re
@@ -16,7 +17,6 @@ from urllib.parse import unquote, quote
 from zipfile import ZipFile
 
 import PIL.Image
-import litellm
 import redis
 import requests
 from PIL import UnidentifiedImageError
@@ -44,8 +44,6 @@ from django_scopes import scopes_disabled
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, OpenApiExample, inline_serializer
 from icalendar import Calendar, Event
-from litellm import completion, BadRequestError
-from litellm.exceptions import Timeout as LitellmTimeout
 from oauth2_provider.models import AccessToken
 from recipe_scrapers import scrape_html
 from recipe_scrapers._exceptions import NoSchemaFoundInWildMode
@@ -70,7 +68,7 @@ from cookbook.connectors.connector_manager import ConnectorManager, ActionType
 from cookbook.forms import ImportForm, ImportExportBase
 from cookbook.helper import recipe_url_import as helper
 from cookbook.helper.HelperFunctions import str2bool, safe_request
-from cookbook.helper.ai_helper import can_perform_ai_request, AiCallbackHandler
+from cookbook.helper.ai_helper import AI_OUTPUT_TOKEN_BUDGETS, AiIntegrationError, can_perform_ai_request, complete_structured, get_ai_provider
 from cookbook.helper.batch_edit_helper import add_to_relation, remove_from_relation, remove_all_from_relation, set_relation
 from cookbook.helper.image_processing import handle_image
 from cookbook.helper.ingredient_parser import IngredientParser
@@ -126,7 +124,9 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
 from cookbook.version_info import TANDOOR_VERSION
 from cookbook.views.import_export import get_integration
 from recipes import settings
-from recipes.settings import DRF_THROTTLE_RECIPE_URL_IMPORT, FDC_API_KEY, AI_RATELIMIT, AI_ALLOWED_URLS
+from recipes.settings import DRF_THROTTLE_RECIPE_URL_IMPORT, FDC_API_KEY, AI_RATELIMIT
+
+logger = logging.getLogger(__name__)
 
 DateExample = OpenApiExample('Date Format', value='1972-12-05', request_only=True)
 BeforeDateExample = OpenApiExample('Before Date Format', value='-1972-12-05', request_only=True)
@@ -1237,10 +1237,6 @@ class FoodViewSet(LoggingMixin, TreeMixin, DeleteRelationMixing):
                 }
                 return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
-            ai_provider = AiProvider.objects.filter(pk=request.query_params.get('provider')).filter(Q(space=request.space) | Q(space__isnull=True)).first()
-
-            litellm.callbacks = [AiCallbackHandler(request.space, request.user, ai_provider, AiLog.F_FOOD_PROPERTIES)]
-
             property_type_list = list(PropertyType.objects.filter(space=request.space).values('id', 'name', 'description', 'unit', 'category', 'fdc_id'))
             messages = [
                 {
@@ -1268,40 +1264,18 @@ class FoodViewSet(LoggingMixin, TreeMixin, DeleteRelationMixing):
             ]
 
             try:
-                ai_request = {
-                    'api_key': ai_provider.api_key,
-                    'model': ai_provider.model_name,
-                    'response_format': {"type": "json_object"},
-                    'messages': messages,
-                }
-                if ai_provider.url:
-                    if not ai_provider.url in AI_ALLOWED_URLS:
-                        raise  Exception(f'AI provider URL not allowed: {ai_provider.url}')
-                    ai_request['api_base'] = ai_provider.url
-                ai_response = completion(**ai_request)
-
-                response_text = ai_response.choices[0].message.content
-
-                return Response(json.loads(response_text), status=status.HTTP_200_OK)
-            except LitellmTimeout:
-                response = {
-                    'error': True,
-                    'msg': 'The AI request timed out. Please try again later.',
-                }
-                return Response(response, status=status.HTTP_408_REQUEST_TIMEOUT)
-            except BadRequestError as err:
-                response = {
-                    'error': True,
-                    'msg': 'The AI could not process your request. \n\n' + err.message,
-                }
-                return Response(response, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as err:
-                traceback.print_exc()
-                response = {
-                    'error': True,
-                    'msg': 'An unexpected error occurred while processing your AI request. \n\n' + str(err),
-                }
-                return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                ai_provider = get_ai_provider(request.query_params.get('provider'), request.space)
+                response_data = complete_structured(
+                    ai_provider,
+                    messages,
+                    request.space,
+                    request.user,
+                    AiLog.F_FOOD_PROPERTIES,
+                    max_output_tokens=AI_OUTPUT_TOKEN_BUDGETS[AiLog.F_FOOD_PROPERTIES],
+                )
+                return Response(response_data, status=status.HTTP_200_OK)
+            except AiIntegrationError as err:
+                return Response(err.as_response(), status=err.status_code)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def destroy(self, *args, **kwargs):
@@ -2048,10 +2022,6 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
                 }
                 return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
-            ai_provider = AiProvider.objects.filter(pk=request.query_params.get('provider')).filter(Q(space=request.space) | Q(space__isnull=True)).first()
-
-            litellm.callbacks = [AiCallbackHandler(request.space, request.user, ai_provider, AiLog.F_RECIPE_PROPERTIES)]
-
             property_type_list = list(PropertyType.objects.filter(space=request.space).values('id', 'name', 'description', 'unit', 'category', 'fdc_id'))
             messages = [
                 {
@@ -2079,40 +2049,18 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
             ]
 
             try:
-                ai_request = {
-                    'api_key': ai_provider.api_key,
-                    'model': ai_provider.model_name,
-                    'response_format': {"type": "json_object"},
-                    'messages': messages,
-                }
-                if ai_provider.url:
-                    if not ai_provider.url in AI_ALLOWED_URLS:
-                        raise  Exception(f'AI provider URL not allowed: {ai_provider.url}')
-                    ai_request['api_base'] = ai_provider.url
-                ai_response = completion(**ai_request)
-
-                response_text = ai_response.choices[0].message.content
-
-                return Response(json.loads(response_text), status=status.HTTP_200_OK)
-            except LitellmTimeout:
-                response = {
-                    'error': True,
-                    'msg': 'The AI request timed out. Please try again later.',
-                }
-                return Response(response, status=status.HTTP_408_REQUEST_TIMEOUT)
-            except BadRequestError as err:
-                response = {
-                    'error': True,
-                    'msg': 'The AI could not process your request. \n\n' + err.message,
-                }
-                return Response(response, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as err:
-                traceback.print_exc()
-                response = {
-                    'error': True,
-                    'msg': 'An unexpected error occurred while processing your AI request. \n\n' + str(err),
-                }
-                return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                ai_provider = get_ai_provider(request.query_params.get('provider'), request.space)
+                response_data = complete_structured(
+                    ai_provider,
+                    messages,
+                    request.space,
+                    request.user,
+                    AiLog.F_RECIPE_PROPERTIES,
+                    max_output_tokens=AI_OUTPUT_TOKEN_BUDGETS[AiLog.F_RECIPE_PROPERTIES],
+                )
+                return Response(response_data, status=status.HTTP_200_OK)
+            except AiIntegrationError as err:
+                return Response(err.as_response(), status=err.status_code)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(responses=RecipeSerializer(many=False))
@@ -2730,10 +2678,6 @@ class AiImportView(APIView):
                 }
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_400_BAD_REQUEST)
 
-            ai_provider = AiProvider.objects.filter(pk=serializer.validated_data['ai_provider_id']).filter(Q(space=request.space) | Q(space__isnull=True)).first()
-
-            litellm.callbacks = [AiCallbackHandler(request.space, request.user, ai_provider, AiLog.F_FILE_IMPORT)]
-
             messages = []
             uploaded_file = serializer.validated_data['file']
 
@@ -2806,33 +2750,20 @@ class AiImportView(APIView):
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_400_BAD_REQUEST)
 
             try:
-                ai_request = {
-                    'api_key': ai_provider.api_key,
-                    'model': ai_provider.model_name,
-                    'response_format': {"type": "json_object"},
-                    'messages': messages,
-                }
-                if ai_provider.url:
-                    if not ai_provider.url in AI_ALLOWED_URLS:
-                        raise  Exception(f'AI provider URL not allowed: {ai_provider.url}')
-                    ai_request['api_base'] = ai_provider.url
-                ai_response = completion(**ai_request)
-            except LitellmTimeout:
-                response = {
-                    'error': True,
-                    'msg': 'The AI request timed out. Please try again later.',
-                }
-                return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_408_REQUEST_TIMEOUT)
-            except BadRequestError as err:
-                response = {
-                    'error': True,
-                    'msg': 'The AI could not process your request. \n\n' + err.message,
-                }
-                return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_400_BAD_REQUEST)
-            response_text = ai_response.choices[0].message.content
+                ai_provider = get_ai_provider(serializer.validated_data['ai_provider_id'], request.space)
+                data_json = complete_structured(
+                    ai_provider,
+                    messages,
+                    request.space,
+                    request.user,
+                    AiLog.F_FILE_IMPORT,
+                    max_output_tokens=AI_OUTPUT_TOKEN_BUDGETS[AiLog.F_FILE_IMPORT],
+                )
+            except AiIntegrationError as err:
+                response = RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(err.as_response())
+                return Response(response, status=err.status_code)
 
             try:
-                data_json = json.loads(response_text)
                 data = "<script type='application/ld+json'>" + json.dumps(data_json) + "</script>"
 
                 scrape = scrape_html(html=data, org_url='https://urlnotfound.none', supported_only=False)
@@ -2846,19 +2777,16 @@ class AiImportView(APIView):
                     response['images'] = []
                     response['duplicates'] = Recipe.objects.filter(space=request.space, name=recipe['name']).values('id', 'name').all()
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
-            except JSONDecodeError:
-                traceback.print_exc()
-                response = {
-                    'error': True,
-                    'msg': "Error parsing AI results. Response Text:\n\n" + response_text
-                }
-                return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_400_BAD_REQUEST)
-            except Exception:
-                traceback.print_exc()
-                response = {
-                    'error': True,
-                    'msg': "Error processing AI results. Response Text:\n\n" + response_text + "\n\n" + traceback.format_exc()
-                }
+            except Exception as err:
+                logger.error(
+                    'AI import result conversion failed',
+                    extra={
+                        'ai_model': getattr(ai_provider, 'model_name', None),
+                        'ai_function': AiLog.F_FILE_IMPORT,
+                        'exception_type': type(err).__name__,
+                    },
+                )
+                response = {'error': True, 'msg': 'The structured AI result could not be converted into a recipe.'}
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_400_BAD_REQUEST)
         else:
             response = {

@@ -49,7 +49,7 @@ TIMEOUT_SIDE_EFFECT = Timeout(
 @pytest.mark.django_db
 class TestFoodAiPropertiesTimeout:
 
-    @patch('cookbook.views.api.completion')
+    @patch('cookbook.helper.ai_helper.completion')
     def test_timeout_returns_408(self, mock_completion, ai_space, food_1, a1_s1):
         mock_completion.side_effect = TIMEOUT_SIDE_EFFECT
         PropertyType.objects.create(name='test_prop', space=ai_space)
@@ -70,7 +70,7 @@ class TestFoodAiPropertiesTimeout:
 @pytest.mark.django_db
 class TestRecipeAiPropertiesTimeout:
 
-    @patch('cookbook.views.api.completion')
+    @patch('cookbook.helper.ai_helper.completion')
     def test_timeout_returns_408(self, mock_completion, ai_space, recipe_1, a1_s1):
         mock_completion.side_effect = TIMEOUT_SIDE_EFFECT
         PropertyType.objects.create(name='test_prop', space=ai_space)
@@ -114,7 +114,7 @@ class TestAiStepSortTimeout:
 @pytest.mark.django_db
 class TestAiImportTimeout:
 
-    @patch('cookbook.views.api.completion')
+    @patch('cookbook.helper.ai_helper.completion')
     def test_timeout_returns_408(self, mock_completion, ai_space, a1_s1):
         mock_completion.side_effect = TIMEOUT_SIDE_EFFECT
 
