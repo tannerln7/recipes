@@ -1,10 +1,9 @@
 import html
-import re
 from gettext import gettext as _
 
 import bleach
 import markdown as md
-from jinja2 import Template, TemplateSyntaxError, UndefinedError
+from jinja2 import TemplateSyntaxError, UndefinedError
 from jinja2.exceptions import SecurityError
 from jinja2.sandbox import SandboxedEnvironment
 from markdown.extensions.tables import TableExtension
@@ -95,6 +94,41 @@ class IngredientObject(object):
             self.food = ""
         self.note = bleach.clean(str(ingredient.note))
 
+    @classmethod
+    def from_dict(cls, ingredient):
+        obj = cls.__new__(cls)
+        amount = ingredient.get('amount')
+        no_amount = ingredient.get('no_amount', False)
+
+        if no_amount:
+            obj.amount = ""
+            obj.numeric_amount = 0
+        else:
+            try:
+                amount_val = float(amount)
+            except (ValueError, TypeError):
+                amount_val = 0.0
+            obj.amount = f"<scalable-number v-bind:number='{amount_val}' v-bind:factor='ingredient_factor'></scalable-number>"
+            obj.numeric_amount = amount_val
+
+        unit = ingredient.get('unit') or {}
+        unit_name = str(unit.get('name', ''))
+        unit_plural = unit.get('plural_name')
+        if not no_amount and unit_plural not in (None, '') and amount_val != 1:
+            unit_name = str(unit_plural)
+        obj.unit = bleach.clean(unit_name)
+
+        food = ingredient.get('food') or {}
+        food_name = str(food.get('name', ''))
+        food_plural = food.get('plural_name')
+        if food_plural in (None, ''):
+            obj.food = bleach.clean(food_name)
+        else:
+            obj.food = _plural_name_tag(food_name, food_plural, amount, no_amount)
+
+        obj.note = bleach.clean(str(ingredient.get('note') or ''))
+        return obj
+
     def __str__(self):
         ingredient = self.amount
         if self.unit != "":
@@ -102,19 +136,46 @@ class IngredientObject(object):
         return f'{ingredient} {self.food}'
 
 
-def render_instructions(step):  # TODO deduplicate markdown cleanup code
-    instructions = step.instruction
+def render_instruction_text(instruction, ingredients=None):
+    instructions = instruction
+    ingredients = list(ingredients or [])
 
     allowed_tags = [
-        "h1", "h2", "h3", "h4", "h5", "h6",
-        "b", "i", "strong", "em", "tt",
-        "p", "br",
-        "span", "div", "blockquote", "code", "pre", "hr",
-        "ul", "ol", "li", "dd", "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "b",
+        "i",
+        "strong",
+        "em",
+        "tt",
+        "p",
+        "br",
+        "span",
+        "div",
+        "blockquote",
+        "code",
+        "pre",
+        "hr",
+        "ul",
+        "ol",
+        "li",
+        "dd",
+        "dt",
         "img",
         "a",
-        "sub", "sup",
-        'pre', 'table', 'td', 'tr', 'th', 'tbody', 'thead',
+        "sub",
+        "sup",
+        'pre',
+        'table',
+        'td',
+        'tr',
+        'th',
+        'tbody',
+        'thead',
     ]
 
     allowed_attributes = {
@@ -130,16 +191,12 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
     instructions = md.markdown(
         instructions,
         extensions=[
-            'markdown.extensions.fenced_code', 'markdown.extensions.sane_lists', 'markdown.extensions.nl2br', TableExtension(),
-            UrlizeExtension(), MarkdownFormatExtension()
+            'markdown.extensions.fenced_code', 'markdown.extensions.sane_lists', 'markdown.extensions.nl2br',
+            TableExtension(),
+            UrlizeExtension(),
+            MarkdownFormatExtension()
         ]
     )
-
-    # prepare template context
-    ingredients = []
-
-    for i in step.ingredients.all():
-        ingredients.append(IngredientObject(i))
 
     def scale(number):
         try:
@@ -160,8 +217,8 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
         return _('Could not parse template code.') + ' Error: Undefined Error'
     except SecurityError:
         return _('Could not parse template code.') + ' Error: Security Error'
-    except Exception as e:
-        return _('Could not parse template code.') + f' Error generating template.'
+    except Exception:
+        return _('Could not parse template code.') + ' Error generating template.'
 
     # do second cleaning that allows scalable-number
     def validate_scalable_number_attributes(tag, name, value):
@@ -186,7 +243,10 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
             return value == 'ingredient_factor'
         if name == ':no-amount':
             return value == 'true' or value == 'false'
-        if name in ["singular", "plural", ]:
+        if name in [
+            "singular",
+            "plural",
+        ]:
             return True
         return False
 
@@ -199,7 +259,12 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
     instructions = bleach.clean(instructions, allowed_tags, allowed_attributes)
 
     # remove any left over { }
-    instructions = instructions.replace('{','')
-    instructions = instructions.replace('}','')
+    instructions = instructions.replace('{', '')
+    instructions = instructions.replace('}', '')
 
     return instructions
+
+
+def render_instructions(step):
+    ingredients = [IngredientObject(ingredient) for ingredient in step.ingredients.all()]
+    return render_instruction_text(step.instruction, ingredients)

@@ -91,7 +91,7 @@ class TestRecipeAiPropertiesTimeout:
 @pytest.mark.django_db
 class TestAiStepSortTimeout:
 
-    @patch('cookbook.views.api.completion')
+    @patch('cookbook.helper.ai_helper.completion')
     def test_timeout_returns_408(self, mock_completion, ai_space, recipe_1, a1_s1):
         mock_completion.side_effect = TIMEOUT_SIDE_EFFECT
         step1 = StepFactory.create(space=ai_space, ingredients__count=0)

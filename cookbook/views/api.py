@@ -65,10 +65,12 @@ from rest_framework.viewsets import ViewSetMixin
 from treebeard.exceptions import InvalidMoveToDescendant, InvalidPosition, PathOverflow
 
 from cookbook.connectors.connector_manager import ConnectorManager, ActionType
+from cookbook.ai_serializers import AI_STEP_SORT_RESPONSE_SCHEMA
 from cookbook.forms import ImportForm, ImportExportBase
 from cookbook.helper import recipe_url_import as helper
 from cookbook.helper.HelperFunctions import str2bool, safe_request
 from cookbook.helper.ai_helper import AI_OUTPUT_TOKEN_BUDGETS, AiIntegrationError, can_perform_ai_request, complete_structured, get_ai_provider
+from cookbook.helper.ai_step_sort import build_step_sort_payload, reconstruct_step_sorted_recipe
 from cookbook.helper.batch_edit_helper import add_to_relation, remove_from_relation, remove_all_from_relation, set_relation
 from cookbook.helper.image_processing import handle_image
 from cookbook.helper.ingredient_parser import IngredientParser
@@ -2806,7 +2808,7 @@ class AiStepSortView(APIView):
                    ])
     def post(self, request, *args, **kwargs):
         """
-        given an image or PDF file convert its content to a structured recipe using AI and the scraping system
+        split recipe instructions and assign ingredients using a compact AI plan
         """
         serializer = RecipeSerializer(data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
@@ -2825,64 +2827,40 @@ class AiStepSortView(APIView):
                 }
                 return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
-            ai_provider = AiProvider.objects.filter(pk=request.query_params.get('provider')).filter(Q(space=request.space) | Q(space__isnull=True)).first()
-
-            litellm.callbacks = [AiCallbackHandler(request.space, request.user, ai_provider, AiLog.F_STEP_SORT)]
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "You are given data for a recipe formatted as json. You cannot under any circumstance change the value of any of the fields. You are only allowed to split the instructions into multiple steps and to sort the ingredients to their appropriate step. Your goal is to properly structure the recipe by splitting large instructions into multiple coherent steps and putting the ingredients that belong to this step into the ingredients list. Generally an ingredient of a cooking recipe should occur in the first step where its needed. Please sort the ingredients to the appropriate steps without changing any of the actual field values. Return the recipe in the same format you were given as json. Do not change any field value like strings or numbers, or change the sorting, also do not change the language."
-
-                        },
-                        {
-                            "type": "text",
-                            "text": json.dumps(request.data, ensure_ascii=False)
-                        },
-
-                    ]
-                },
-            ]
-
             try:
-                ai_request = {
-                    'api_key': ai_provider.api_key,
-                    'model': ai_provider.model_name,
-                    'response_format': {"type": "json_object"},
-                    'messages': messages,
-                }
-                if ai_provider.url:
-                    if not ai_provider.url in AI_ALLOWED_URLS:
-                        raise  Exception(f'AI provider URL not allowed: {ai_provider.url}')
-                    ai_request['api_base'] = ai_provider.url
-                ai_response = completion(**ai_request)
-
-                response_text = ai_response.choices[0].message.content
-                # TODO validate by loading/dumping using serializer ?
-
-                return Response(json.loads(response_text), status=status.HTTP_200_OK)
-            except LitellmTimeout:
-                response = {
-                    'error': True,
-                    'msg': 'The AI request timed out. Please try again later.',
-                }
-                return Response(response, status=status.HTTP_408_REQUEST_TIMEOUT)
-            except BadRequestError as err:
-                response = {
-                    'error': True,
-                    'msg': 'The AI could not process your request. \n\n' + err.message,
-                }
-                return Response(response, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as err:
-                traceback.print_exc()
-                response = {
-                    'error': True,
-                    'msg': 'An unexpected error occurred while processing your AI request. \n\n' + str(err),
-                }
-                return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                compact_payload, step_sort_context = build_step_sort_payload(request.data)
+                messages = [{
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text':
+                                'Split each source instruction into coherent recipe steps and assign every ingredient '
+                                'occurrence to the first resulting step where it is used. Return only a JSON '
+                                'transformation plan matching the requested schema. Preserve the language and source '
+                                'instruction order. Assign every ingredient occurrence exactly once; ingredient keys '
+                                'may move to a step derived from any source step. Do not invent, omit, or duplicate keys.',
+                        },
+                        {
+                            'type': 'text',
+                            'text': json.dumps(compact_payload, ensure_ascii=False),
+                        },
+                    ],
+                }]
+                ai_provider = get_ai_provider(request.query_params.get('provider'), request.space)
+                plan = complete_structured(
+                    ai_provider,
+                    messages,
+                    request.space,
+                    request.user,
+                    AiLog.F_STEP_SORT,
+                    json_schema=AI_STEP_SORT_RESPONSE_SCHEMA,
+                    max_output_tokens=AI_OUTPUT_TOKEN_BUDGETS[AiLog.F_STEP_SORT],
+                )
+                response_data = reconstruct_step_sorted_recipe(plan, step_sort_context, request)
+                return Response(response_data, status=status.HTTP_200_OK)
+            except AiIntegrationError as err:
+                return Response(err.as_response(), status=err.status_code)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
