@@ -77,9 +77,46 @@ URL: (leave empty)
 Log credit cost: enabled
 ```
 
+#### Cloudflare Workers AI
+
+Cloudflare Workers AI uses the account ID from the Tandoor application environment and the API token from the provider configuration.
+
+Set this environment variable on the Tandoor application container:
+
+```text
+CLOUDFLARE_ACCOUNT_ID=<Cloudflare account ID>
+```
+
+Then configure the provider:
+
+```text
+Name: Cloudflare Workers AI
+Model name: cloudflare/@cf/meta/llama-3.2-11b-vision-instruct
+API key: <Workers AI API token>
+URL: (leave empty)
+Log credit cost: enabled
+```
+
+The recommended Meta vision model requires one-time acceptance of Meta's license and acceptable use policy before normal requests work. Run this once with your own account ID and Workers AI token:
+
+```bash
+curl "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.2-11b-vision-instruct" \
+  -X POST \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"agree"}'
+```
+
+This acceptance step applies to the recommended `@cf/meta/llama-3.2-11b-vision-instruct` model and is not necessarily required by every Cloudflare model. See Cloudflare's [Llama Vision tutorial](https://developers.cloudflare.com/workers-ai/guides/tutorials/llama-vision-tutorial/) for details.
+
+The API token must have access to Workers AI for the configured account. Image import requires a vision-capable model. Native PDF input remains model- and provider-dependent; convert a PDF to images or use text import when the selected model does not accept PDFs.
+
+When the URL is left empty, Tandoor uses Cloudflare's native `/ai/run/<model>` endpoint so Workers AI can enforce `json_object` and `json_schema` response formats. A Cloudflare provider with a custom URL continues through LiteLLM's configured endpoint path; that endpoint or gateway must support structured output itself.
+
 ### Requirements for models
 Tandoor expects structured JSON responses from every AI call, so your model must support JSON mode or reliably return JSON.
 For image/PDF import the provider must support vision inputs.
+JSON Schema enforcement and other structured-output details vary by provider. Tandoor validates all structured results even when a provider only supports basic JSON mode.
 
 <!-- prettier-ignore -->
 !!! warning
