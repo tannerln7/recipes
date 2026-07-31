@@ -1,4 +1,4 @@
-# set paths to writable location as non-root by default
+# Set paths to writable locations because nginx runs non-root.
 proxy_temp_path /tmp/proxy_temp;
 client_body_temp_path /tmp/client_temp;
 fastcgi_temp_path /tmp/fastcgi_temp;
@@ -6,33 +6,44 @@ uwsgi_temp_path /tmp/uwsgi_temp;
 scgi_temp_path /tmp/scgi_temp;
 
 server {
-  listen ${TANDOOR_PORT};
-  listen [::]:${TANDOOR_PORT} ipv6only=on;
-  server_name localhost;
+  listen 443 ssl default_server;
+  listen [::]:443 ssl default_server ipv6only=on;
+
+  # Generic default server so no private hostname is stored in the image.
+  server_name _;
+
+  ssl_certificate /ssl/fullchain.pem;
+  ssl_certificate_key /ssl/privkey.pem;
+
+  # The global nginx config already defines the session cache,
+  # timeout, and ticket settings.
+  ssl_protocols TLSv1.2 TLSv1.3;
 
   client_max_body_size 512M;
 
-  # serve media files
+  # Serve media files.
   location /media {
     alias ${MEDIA_ROOT};
     add_header Content-Disposition 'attachment; filename="$args"';
   }
 
-  # serve service worker under main path
+  # Serve the service worker under the main path.
   location = /service-worker.js {
     alias ${STATIC_ROOT}/vue3/service-worker.js;
   }
 
-  # pass requests for dynamic content to gunicorn
+  # Pass dynamic requests to Gunicorn through Tandoor's Unix socket.
   location / {
     proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+
     proxy_pass http://unix:/tmp/tandoor.sock;
 
-    # param needed by django allauth sessions to log IP
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-
-    # disabled for now because it redirects to the error page and not back, also not showing html
-    #error_page 502 /errors/http502.html;
+    # Disabled because of the existing error-page redirect behavior.
+    # error_page 502 /errors/http502.html;
   }
 
   location /errors/ {
